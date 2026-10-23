@@ -607,6 +607,8 @@ static int unlock_transaction_fwsec(struct unlock_transaction_work *work)
 {
 	static const struct gu_falcon_engine gsp = {
 		.base = GU_GSP_BASE, .fbif = GU_GSP_FBIF_BASE, .falcon2 = GU_GSP_FALCON2_BASE,
+		/* The WPR2 range check below proves FWSEC-FRTS ran. */
+		.stale_halt_ok = true,
 	};
 	struct gu_falcon_io io = falcon_io(work);
 	size_t mapped = 0;
@@ -718,11 +720,12 @@ static int unlock_transaction_fwsec(struct unlock_transaction_work *work)
 		wpr_lo, wpr_hi, (unsigned long long)(frts >> 12),
 		(unsigned long long)work->layout.wpr_end);
 	/* Match NVIDIA's initialized-WPR2 check as well as the expected low
-	 * address. Never publish Booter metadata for disabled/alien WPR2. */
+	 * address. Never publish Booter metadata for disabled/alien WPR2. FWSEC
+	 * sizes the region itself (0xe1000 bytes on GA102), so the high end is
+	 * only bounded by the reserve. */
 	if (!(wpr_hi >> 4) || (wpr_hi >> 4) < (wpr_lo >> 4) ||
 	    ((u64)(wpr_hi >> 4) << 12) >= work->layout.wpr_end ||
-	    (wpr_lo >> 4) != (u32)(frts >> 12) ||
-	    (((u64)(wpr_hi >> 4) + 1) << 12) != work->layout.wpr_end)
+	    (wpr_lo >> 4) != (u32)(frts >> 12))
 		ret = -EIO;
 	if (!ret) {
 		work->frts_lo = wpr_lo;

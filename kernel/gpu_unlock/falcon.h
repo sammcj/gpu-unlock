@@ -13,7 +13,9 @@ struct gu_falcon_io {
 	int (*read)(void *context, u32 offset, u32 *value);
 	void (*write)(void *context, u32 offset, u32 value);
 };
-struct gu_falcon_engine { u32 base, fbif, falcon2; };
+/* stale_halt_ok: some GA102 boards keep GSP HALTED across reset (RM never
+ * checks it). Only set where the firmware's result is verified independently. */
+struct gu_falcon_engine { u32 base, fbif, falcon2; bool stale_halt_ok; };
 
 /* Reset for every operation, including validation failures. Available on error.
  * started records a submitted start; halted records a successful halt wait.

@@ -31,7 +31,7 @@ static struct {
     int fwsec_wpr;u32 fwsec_wpr_lo,fwsec_wpr_hi; /* WPR2 that FWSEC-FRTS enables */
     int apertures,regions;
     int bound,gfw_late,gfw_late_reads; /* resume: nvidia bound; GFW done after N reads */
-    int deny_wpr, deny_reset, fail_write, fail_attempt, write_nohalt, mailbox_error, stale_halt;
+    int deny_wpr, deny_reset, fail_write, fail_attempt, write_nohalt, mailbox_error, stale_halt, gsp_stale_halt;
     u32 fail_address;
     int corrupt_boot_bundle;
     const char *corrupt_asset;
@@ -158,7 +158,7 @@ void writel(u32 v,void *p) {
         if(fake.boot_mode==2)regs[(GU_SEC2_BASE+0x100)/4]=~0u;
         if(fake.boot_mode==3){regs[(GU_SEC2_BASE+0x100)/4]=0x10;regs[(GU_SEC2_BASE+0x40)/4]=0x91;}
     }
-    if(off==0x1103c0 && (v&1) && !fake.flrs)regs[0x110100/4]=0;
+    if(off==0x1103c0 && (v&1) && !fake.flrs && !fake.gsp_stale_halt)regs[0x110100/4]=0;
     if(off==GU_SEC2_BASE+0x3c0 && (v&1)) {
         if(regs[(GU_SEC2_BASE+0x100)/4]!=~0u)
             regs[(GU_SEC2_BASE+0x100)/4]=fake.stale_halt?0x10:regs[(GU_SEC2_BASE+0x100)/4]&64;
@@ -376,7 +376,7 @@ int main(int argc, char **argv) {
      * and the documented tolerated pre-reset timeout. */
     for(int mode=0;mode<9;mode++) {
         setup(&w);
-        const struct gu_falcon_engine eng={GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE};
+        const struct gu_falcon_engine eng={GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE,false};
         regs[(GU_SEC2_BASE+0xf4)/4]|=1u<<10;
         regs[(GU_SEC2_FALCON2_BASE+0x668)/4]=mode==0?1:0x10;
         if(mode==2)regs[(GU_SEC2_FALCON2_BASE+0x668)/4]=0xbadf0001;
@@ -413,7 +413,7 @@ int main(int argc, char **argv) {
     }
     for(int mode=0;mode<4;mode++) {
         setup(&w);
-        const struct gu_falcon_engine eng={GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE};
+        const struct gu_falcon_engine eng={GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE,false};
         w.plm_entry=0x8f;
         if(mode==0)regs[(GU_SEC2_FBIF_BASE+0x24)/4]=0xbadf0001;
         if(mode==1)regs[GU_SEC2_FBIF_BASE/4]=~0u;
@@ -430,6 +430,19 @@ int main(int argc, char **argv) {
         assert(fake.starts==(mode==3?1:0));
         if(mode<2)assert(!fake.dma_commands);
     }
+    /* Some GA102 boards keep GSP HALTED across reset, as RM never checks. WPR2
+     * proves FWSEC ran, so only the GSP launch tolerates it; SEC2 stays strict. */
+    for(int sec2=0;sec2<2;sec2++) {
+        setup(&w);
+        fake.gsp_stale_halt=!sec2;fake.stale_halt=sec2;
+        const struct gu_falcon_engine gsp={GU_GSP_BASE,GU_GSP_FBIF_BASE,GU_GSP_FALCON2_BASE,true};
+        const struct gu_falcon_engine sec={GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE,false};
+        regs[(sec2?GU_SEC2_BASE:GU_GSP_BASE)/4+0x40]=0x10;
+        const struct gu_falcon_hs_image program={.dma=0x100000,.code_size=256,
+            .data_off=256,.data_size=256,.engine_mask=1,.ucode_id=3};
+        int ret=gu_falcon_hs(&io,sec2?&sec:&gsp,&program,&evidence);
+        assert(sec2?ret==-ETIMEDOUT && !evidence.started:!ret && evidence.started && evidence.halted);
+    }
     /* Reject DMA address truncation/wrap before any reset or transfer. */
     for(int bad=0;bad<5;bad++) {
         setup(&w);
@@ -441,7 +454,7 @@ int main(int argc, char **argv) {
         assert(!fake.writes);
     }
     {
-        const struct gu_falcon_engine eng={GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE};
+        const struct gu_falcon_engine eng={GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE,false};
         setup(&w);
         struct gu_falcon_hs_image program={.dma=0x100000,.code_size=256,.code_va=0x200000,
             .data_off=256,.data_size=256,.engine_mask=1,.ucode_id=3};
@@ -463,8 +476,8 @@ int main(int argc, char **argv) {
             if(variant==2 && mode==4)continue;
             setup(&w);
             const struct gu_falcon_engine eng=variant==2?
-                (struct gu_falcon_engine){GU_GSP_BASE,GU_GSP_FBIF_BASE,GU_GSP_FALCON2_BASE}:
-                (struct gu_falcon_engine){GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE};
+                (struct gu_falcon_engine){GU_GSP_BASE,GU_GSP_FBIF_BASE,GU_GSP_FALCON2_BASE,true}:
+                (struct gu_falcon_engine){GU_SEC2_BASE,GU_SEC2_FBIF_BASE,GU_SEC2_FALCON2_BASE,false};
             u32 words[192]={0};
             const struct gu_falcon_hs_image hs={.dma=0x100000,.code_size=256,
                 .data_off=256,.data_size=256,.engine_mask=1,.ucode_id=3};
@@ -499,7 +512,7 @@ int main(int argc, char **argv) {
     for(int bad=0;bad<4;bad++) {
         setup(&w);
         u32 code[192]={0};
-        const struct gu_falcon_engine eng={GU_GSP_BASE,GU_GSP_FBIF_BASE,GU_GSP_FALCON2_BASE};
+        const struct gu_falcon_engine eng={GU_GSP_BASE,GU_GSP_FBIF_BASE,GU_GSP_FALCON2_BASE,true};
         struct gu_falcon_loader_image program={.loader=code,.loader_size=sizeof(code),.dma=0x100000};
         if(bad==0)program.loader=NULL;
         if(bad==1)program.loader_size--;
@@ -779,7 +792,8 @@ int main(int argc, char **argv) {
             regs[GU_FEAT_SS1_OFFSET/4]=0x2;
             fake.fwsec_wpr=1;
             fake.fwsec_wpr_lo=(u32)(0x5ffe00000ull>>12)<<4;
-            fake.fwsec_wpr_hi=(u32)(0x5ffeff000ull>>12)<<4;
+            /* Real GA102 FWSEC-FRTS: 0xe1000 bytes, short of the 1 MiB reserve. */
+            fake.fwsec_wpr_hi=(u32)(0x5ffee0000ull>>12)<<4;
             regs[(GU_FUSE_SEC2_UCODE1+2*4)/4]=1;
             /* FWSEC fuse: the real board ROM needs version 1, the fixture 0. */
             if(strcmp(argv[1],"-"))regs[(0x8241c0+8*4)/4]=1;

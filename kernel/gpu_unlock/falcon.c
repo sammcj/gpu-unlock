@@ -205,6 +205,16 @@ int gu_falcon_dma(const struct gu_falcon_io *io, u32 base, u32 dest, u32 mem_off
 	return gu_falcon_poll(io, base + GU_FALCON_DMATRFCMD_OFFSET, 2, 2, 1000000, true, NULL);
 }
 
+/* A HALTED bit left over from reset would satisfy the halt wait before the
+ * firmware has run. */
+static int falcon_not_halted(const struct gu_falcon_io *io, const struct gu_falcon_engine *eng)
+{
+	int ret = gu_falcon_poll(io, eng->base + GU_FALCON_CPUCTL_OFFSET, 16, 0, 1000,
+				 !eng->stale_halt_ok, NULL);
+
+	return ret == -ETIMEDOUT && eng->stale_halt_ok ? 0 : ret;
+}
+
 int gu_falcon_hs(const struct gu_falcon_io *io, const struct gu_falcon_engine *eng,
 		 const struct gu_falcon_hs_image *program,
 		 struct gu_falcon_evidence *evidence)
@@ -226,7 +236,7 @@ int gu_falcon_hs(const struct gu_falcon_io *io, const struct gu_falcon_engine *e
 	ret = gu_falcon_reset(io, eng, evidence);
 	if (ret)
 		return ret;
-	ret = gu_falcon_poll(io, eng->base + GU_FALCON_CPUCTL_OFFSET, 16, 0, 1000, true, NULL);
+	ret = falcon_not_halted(io, eng);
 	if (ret)
 		return ret;
 	if (falcon_read(io, eng->fbif + GU_FBIF_CTL_OFFSET, &trans) || inaccessible(trans))
@@ -371,7 +381,7 @@ int gu_falcon_direct(const struct gu_falcon_io *io, const struct gu_falcon_engin
 	ret = gu_falcon_reset(io, eng, evidence);
 	if (ret)
 		return ret;
-	ret = gu_falcon_poll(io, eng->base + GU_FALCON_CPUCTL_OFFSET, 16, 0, 1000, true, NULL);
+	ret = falcon_not_halted(io, eng);
 	if (ret)
 		return ret;
 	/* REQUIRE_CTX=false, matching kflcnDisableCtxReq. */
